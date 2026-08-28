@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "MeetCaller",
+  "version": "0.1",
+  "description": "Detecta eventos del calendario iCal privado y muestra llamada entrante.",
+  "permissions": [
+    "alarms",
+    "storage",
+    "notifications",
+    "offscreen",
+    "windows",
+    "activeTab",
+    "identity"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "MeetCaller"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "oauth2": {
+    "client_id": "REPLACE_WITH_YOUR_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/calendar.readonly"
+    ]
+  }
+}

@@ -1,0 +1,72 @@
+:root{
+  --brand:#2b8a3e;
+  --accent:#0052cc;
+  --bg:#f4f6f8;
+  --card:#ffffff;
+  --muted:#6b7280;
+  --radius:8px;
+  --shadow: 0 2px 8px rgba(16,24,40,0.08);
+}
+*{box-sizing:border-box}
+body{font-family:Inter,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:#111;margin:0;padding:0}
+.app{max-width:920px;margin:28px auto;padding:20px}
+.card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px}
+h2{margin:0 0 12px;font-size:20px;color:#111}
+label{display:block;margin-top:12px;font-size:14px;color:var(--muted)}
+input[type=text],input[type=number]{width:100%;padding:10px;border:1px solid #e6e9ee;border-radius:6px;margin-top:6px}
+button{background:var(--accent);color:white;border:none;padding:10px 14px;border-radius:6px;cursor:pointer;font-weight:600}
+button.secondary{background:#e6eefc;color:var(--accent);border:1px solid rgba(0,82,204,0.08)}
+.row{display:flex;gap:10px;align-items:center}
+.events{margin-top:16px}
+.event{padding:12px;border-bottom:1px solid #eef2f6}
+.event strong{color:#0f172a}
+.small{font-size:13px;color:var(--muted)}
+.actions{margin-top:14px;display:flex;gap:10px}
+.auth-status{margin-top:8px;padding:8px;border-radius:6px;background:#f8fafc;color:var(--muted);font-size:13px}
+.popup{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px;gap:10px}
+.call-title{font-size:18px;font-weight:700;color:#111;text-align:center;margin-bottom:6px}
+.call-link{font-size:13px;color:var(--muted);text-align:center;margin-bottom:12px;word-break:break-word}
+.btn-accept{background:var(--brand);color:#fff;padding:10px 16px;border-radius:10px;border:none;font-weight:700}
+.btn-reject{background:#ef4444;color:#fff;padding:10px 16px;border-radius:10px;border:none}
+
+/* center actions inside popup */
+.popup .actions{justify-content:center;flex-wrap:wrap}
+.call-time{font-size:13px;color:var(--muted);text-align:center;margin-bottom:6px}
+.events-container{display:flex;flex-direction:column;gap:12px;width:100%;max-height:260px;overflow:auto}
+.call-card{border:1px solid #e6e9ee;border-radius:10px;padding:12px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.05);display:flex;flex-direction:column;align-items:center;text-align:center;gap:8px}
+.call-card .actions{width:100%;display:flex;justify-content:center;gap:12px}
+.call-card .call-link{margin-bottom:0}
+
+@media (min-width:600px){.app{padding:30px}}
+
+/* ---- Countdown box ---- */
+.countdown-box {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  background: #f8fafc;
+  border: 1px solid #e6e9ee;
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  margin-bottom: 14px;
+}
+.countdown-label {
+  font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+  font-size: 13px;
+  color: var(--muted);
+}
+.countdown-value {
+  font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: #111;
+}
+.countdown-event-name {
+  font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}

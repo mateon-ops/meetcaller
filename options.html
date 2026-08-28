@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MeetCaller — Configuración</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <div class="app">
+    <div class="card">
+      <p class="small">Pega tu <strong>OAuth Client ID</strong> (desde Google Cloud) e iniciá sesión con Google</p>
+      <label>Client ID
+        <input id="clientId" type="text" placeholder="1234-...apps.googleusercontent.com" />
+      </label>
+      <div class="row" style="margin-top:8px">
+        <button id="googleSignIn">Iniciar sesión con Google</button>
+        <button id="googleSignOut" class="secondary">Cerrar sesión</button>
+      </div>
+      <div id="authStatus" class="auth-status">Estado de autenticación</div>
+
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="card">
+      <div id="countdownBox" class="countdown-box">
+        <span class="countdown-label">Próxima reunión</span>
+        <span id="countdownValue" class="countdown-value">—</span>
+      </div>
+
+      <p class="small">Introducí la <strong>Dirección privada iCal (.ics)</strong> desde Google Calendar y guarda</p>
+      <label>iCal URL
+        <input id="icalUrl" type="text" placeholder="https://calendar.google.com/.../basic.ics" />
+      </label>
+      <label>Minutos antes de avisar
+        <input id="pollMinutes" type="number" min="0" value="1" />
+      </label>
+      <label>Archivo local del ringtone (MP3 / WAV / M4A)
+        <input id="ringtoneFile" type="file" accept="audio/*,.mp3,.wav,.m4a" />
+      </label>
+      <label class="checkbox-label" style="margin-top:12px;display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="meetOnly" />
+        <span>Solo avisar reuniones de Meet</span>
+      </label>
+      <div class="actions">
+        <button id="save">Guardar</button>
+        <button id="test" class="secondary">Ver eventos</button>
+        <button id="simulateCall" class="secondary">Probar llamada</button>
+      </div>
+
+      <div class="events" id="events" style="display:none"></div>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+
+</html>
