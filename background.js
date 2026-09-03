@@ -133,30 +133,58 @@ function handleEventsFromApi(items, pollMinutes, meetOnly) {
 function fetchGoogleCalendarEvents() {
   return new Promise(async (resolve, reject) => {
     try {
-      const s = await getStorage(['accessToken', 'tokenExpiry']);
-      const expired = !s.accessToken || !s.tokenExpiry || Date.now() >= Number(s.tokenExpiry) - 60 * 1000;
+      let clientId = '';
+      try {
+        const serverBase = 'http://localhost:4200';
+        const conf = await fetch(`${serverBase}/auth/config`);
+        if (conf.ok) {
+          const cj = await conf.json();
+          if (cj && cj.clientId) clientId = cj.clientId;
+        }
+      } catch (e) {
+        console.warn('Server config fetch failed', e);
+      }
 
-      const ensureToken = () => new Promise((resolveToken, rejectToken) => {
-        chrome.identity.getAuthToken({ interactive: false }, (token) => {
-          if (chrome.runtime.lastError || !token) {
-            chrome.identity.getAuthToken({ interactive: true }, (freshToken) => {
-              if (chrome.runtime.lastError || !freshToken) {
-                rejectToken(chrome.runtime.lastError || new Error('La sesión de Google caducó. Inicia sesión otra vez.'));
-                return;
-              }
-              const expiry = Date.now() + 55 * 60 * 1000;
-              chrome.storage.local.set({ accessToken: freshToken, tokenExpiry: expiry });
-              resolveToken(freshToken);
-            });
-            return;
+      if (!clientId) {
+        const s = await getStorage(['clientId']);
+        clientId = s.clientId || '';
+      }
+
+      let token = null;
+      if (clientId) {
+        try {
+          const serverBase = 'http://localhost:4200';
+          const resp = await fetch(`${serverBase}/auth/token?clientId=${encodeURIComponent(clientId)}`);
+          if (resp.ok) {
+            const j = await resp.json();
+            if (j && j.ok && j.token && j.token.access_token) token = j.token.access_token;
           }
-          const expiry = Date.now() + 55 * 60 * 1000;
-          chrome.storage.local.set({ accessToken: token, tokenExpiry: expiry });
-          resolveToken(token);
-        });
-      });
+        } catch (e) {
+          console.warn('Failed to get token from server', e);
+        }
+      }
 
-      const token = expired ? await ensureToken() : s.accessToken;
+      if (!token) {
+        // fallback to chrome.identity only if manifest oauth2.client_id is set
+        const manifestClient = (chrome.runtime.getManifest && chrome.runtime.getManifest().oauth2 && chrome.runtime.getManifest().oauth2.client_id) || '';
+        if (!manifestClient || manifestClient.includes('REPLACE_WITH')) {
+          return reject(new Error('No valid oauth2.client_id in manifest and no server token available'));
+        }
+
+        token = await new Promise((res, rej) => {
+          chrome.identity.getAuthToken({ interactive: false }, (t) => {
+            if (chrome.runtime.lastError || !t) {
+              chrome.identity.getAuthToken({ interactive: true }, (freshToken) => {
+                if (chrome.runtime.lastError || !freshToken) return rej(chrome.runtime.lastError || new Error('No token'));
+                res(freshToken);
+              });
+              return;
+            }
+            res(t);
+          });
+        });
+      }
+
       const now = new Date();
       const timeMin = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
       const timeMax = new Date(now.getFullYear(), now.getMonth(), now.getDate()+1).toISOString();
@@ -302,7 +330,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg?.type === 'dismiss-event') {
     const uid = msg.uid;
-    removeNotification(uid);
+    // Removed removeNotification(uid) so that rejected events stay in lastNotified and don't pop up again
     sendResponse({ ok: true, uid });
     return true;
   }

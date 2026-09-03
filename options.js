@@ -90,7 +90,6 @@ async function loadConfig() {
   const cfg = await new Promise((res) => chrome.storage.local.get(['icalUrl', 'pollMinutes', 'clientId', 'ringtoneUrl', 'meetOnly'], res));
   document.getElementById('icalUrl').value = cfg.icalUrl || '';
   document.getElementById('pollMinutes').value = cfg.pollMinutes || 1;
-  document.getElementById('clientId').value = cfg.clientId || '';
   document.getElementById('meetOnly').checked = !!cfg.meetOnly;
   if (!cfg.ringtoneUrl || !cfg.ringtoneUrl.trim()) {
     try {
@@ -105,7 +104,6 @@ async function loadConfig() {
 async function saveConfig(silent = false) {
   const icalUrl = document.getElementById('icalUrl').value.trim();
   const pollMinutes = Number(document.getElementById('pollMinutes').value) || 1;
-  const clientId = document.getElementById('clientId').value.trim();
   const meetOnly = document.getElementById('meetOnly').checked;
   const fileInput = document.getElementById('ringtoneFile');
 
@@ -121,7 +119,8 @@ async function saveConfig(silent = false) {
     }
   }
 
-  await chrome.storage.local.set({ icalUrl, pollMinutes, clientId, ringtoneUrl, meetOnly });
+  const storeObj = { icalUrl, pollMinutes, ringtoneUrl, meetOnly };
+  await chrome.storage.local.set(storeObj);
   if (fileInput) fileInput.value = '';
   if (!silent) {
     alert('Guardado en la extensión');
@@ -129,17 +128,57 @@ async function saveConfig(silent = false) {
 }
 
 async function updateAuthStatus() {
-  const s = await new Promise((res) => chrome.storage.local.get(['accessToken', 'tokenExpiry'], res));
   const el = document.getElementById('authStatus');
-  if (s && s.accessToken) {
-    const exp = s.tokenExpiry ? new Date(s.tokenExpiry) : null;
-    const expired = isTokenExpired(s.tokenExpiry);
-    el.textContent = expired
-      ? 'Token expirado. Haz clic en “Iniciar sesión con Google” para revalidar la sesión.'
-      : `Conectado. Token expira: ${exp ? exp.toLocaleString() : 'desconocido'}`;
-  } else {
-    el.textContent = 'No conectado';
+  // Prefer server-configured clientId
+  try {
+    const serverBase = 'http://localhost:4200';
+    const conf = await fetch(`${serverBase}/auth/config`);
+    if (conf.ok) {
+      const cj = await conf.json();
+      if (cj && cj.clientId) {
+        const st = await fetch(`${serverBase}/auth/status?clientId=${encodeURIComponent(cj.clientId)}`);
+        if (st.ok) {
+          const j = await st.json();
+          if (j && j.ok && j.hasRefresh) {
+            el.textContent = 'Conectado';
+            return;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Server status check failed', e);
   }
+
+  const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
+  const clientId = cfg.clientId || '';
+  if (clientId) {
+    try {
+      const serverBase = 'http://localhost:4200';
+      const st = await fetch(`${serverBase}/auth/status?clientId=${encodeURIComponent(clientId)}`);
+      if (st.ok) {
+        const j = await st.json();
+        if (j && j.ok && j.hasRefresh) {
+          el.textContent = 'Conectado';
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Server status check failed', e);
+    }
+  }
+
+  return new Promise((resolve) => {
+    chrome.identity.getAuthToken({ interactive: false }, (token) => {
+      if (chrome.runtime.lastError || !token) {
+        el.textContent = 'No conectado';
+        resolve();
+        return;
+      }
+      el.textContent = 'Conectado';
+      resolve();
+    });
+  });
 }
 
 function parseFragment(url) {
@@ -149,21 +188,69 @@ function parseFragment(url) {
   return Object.fromEntries(new URLSearchParams(frag));
 }
 
-function isTokenExpired(tokenExpiry) {
-  if (!tokenExpiry) return true;
-  return Date.now() >= Number(tokenExpiry) - 60 * 1000;
+// PKCE helpers
+function base64UrlEncode(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let str = '';
+  for (let i = 0; i < bytes.byteLength; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sha256(text) {
+  const enc = new TextEncoder();
+  const data = enc.encode(text);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return base64UrlEncode(hash);
+}
+
+function randomString(length = 64) {
+  const arr = new Uint8Array(length);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map(v => ('0' + v.toString(16)).slice(-2)).join('').slice(0, length);
 }
 
 async function ensureGoogleToken({ interactive = false } = {}) {
-  const s = await new Promise((res) => chrome.storage.local.get(['accessToken', 'tokenExpiry'], res));
-  if (s.accessToken && !isTokenExpired(s.tokenExpiry)) {
-    return s.accessToken;
+  // Prefer server-configured clientId; fall back to local storage clientId
+  let clientId = '';
+  try {
+    const serverBase = 'http://localhost:4200';
+    const conf = await fetch(`${serverBase}/auth/config`);
+    if (conf.ok) {
+      const cj = await conf.json();
+      if (cj && cj.clientId) clientId = cj.clientId;
+    }
+  } catch (e) {
+    console.warn('Server config fetch failed', e);
+  }
+
+  if (!clientId) {
+    const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
+    clientId = cfg.clientId || '';
+  }
+
+  if (clientId) {
+    try {
+      const serverBase = 'http://localhost:4200';
+      const resp = await fetch(`${serverBase}/auth/token?clientId=${encodeURIComponent(clientId)}`);
+      if (resp.ok) {
+        const j = await resp.json();
+        if (j && j.ok && j.token && j.token.access_token) return j.token.access_token;
+      }
+    } catch (e) {
+      console.warn('Server token fetch failed', e);
+    }
   }
 
   return new Promise((resolve, reject) => {
+    // Only use chrome.identity.getAuthToken if manifest has a real oauth2.client_id
+    const manifestClient = (chrome.runtime.getManifest && chrome.runtime.getManifest().oauth2 && chrome.runtime.getManifest().oauth2.client_id) || '';
+    if (!manifestClient || manifestClient.includes('REPLACE_WITH')) {
+      reject(new Error('No oauth2 client_id in manifest; use server/clientId flow or set client_id in manifest')); 
+      return;
+    }
+
     chrome.identity.getAuthToken({ interactive }, (token) => {
       if (chrome.runtime.lastError || !token) {
-        const message = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Token no disponible';
         if (!interactive) {
           chrome.identity.getAuthToken({ interactive: true }, (freshToken) => {
             if (chrome.runtime.lastError || !freshToken) {
@@ -171,30 +258,51 @@ async function ensureGoogleToken({ interactive = false } = {}) {
               reject(new Error(msg));
               return;
             }
-            const expiry = Date.now() + 55 * 60 * 1000;
-            chrome.storage.local.set({ accessToken: freshToken, tokenExpiry: expiry });
             resolve(freshToken);
           });
           return;
         }
+        const message = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Token no disponible';
         reject(new Error(message));
         return;
       }
-
-      const expiry = Date.now() + 55 * 60 * 1000;
-      chrome.storage.local.set({ accessToken: token, tokenExpiry: expiry });
       resolve(token);
     });
   });
 }
 
 async function googleSignIn() {
-  const clientId = document.getElementById('clientId').value.trim();
-  if (!clientId) { alert('Pega el Client ID primero'); return; }
-  await chrome.storage.local.set({ clientId });
+  // Determine effective clientId (server .env or stored)
+  let clientId = '';
+  try {
+    const serverBase = 'http://localhost:4200';
+    const conf = await fetch(`${serverBase}/auth/config`);
+    if (conf.ok) {
+      const cj = await conf.json();
+      if (cj && cj.clientId) clientId = cj.clientId;
+    }
+  } catch (e) {
+    console.warn('Failed to fetch server config', e);
+  }
+
+  if (!clientId) {
+    const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
+    clientId = cfg.clientId || '';
+  }
+
+  if (!clientId) { alert('No hay Client ID configurado en el servidor ni localmente'); return; }
   const redirectUri = chrome.identity.getRedirectURL('oauth2');
   const scope = encodeURIComponent('https://www.googleapis.com/auth/calendar.readonly');
-  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&response_type=token&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&prompt=consent`;
+
+  // PKCE
+  const codeVerifier = randomString(64);
+  const codeChallenge = await sha256(codeVerifier);
+
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&access_type=offline&prompt=consent&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256`;
+
+  // store verifier temporarily
+  await chrome.storage.local.set({ pkce_verifier: codeVerifier });
+
   chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, async (redirectedTo) => {
     if (chrome.runtime.lastError) {
       const msg = chrome.runtime.lastError.message || '';
@@ -204,34 +312,90 @@ async function googleSignIn() {
       }
       return;
     }
-    const parts = parseFragment(redirectedTo);
-    if (parts.access_token) {
-      const expiry = parts.expires_in ? Date.now() + Math.min(Number(parts.expires_in), 55 * 60) * 1000 : Date.now() + 55 * 60 * 1000;
-      await chrome.storage.local.set({ accessToken: parts.access_token, tokenExpiry: expiry });
+    try {
+      const urlObj = new URL(redirectedTo);
+      const code = urlObj.searchParams.get('code');
+      const error = urlObj.searchParams.get('error');
+      if (error) {
+        alert('OAuth error: ' + error);
+        return;
+      }
+      if (!code) {
+        alert('No se obtuvo authorization code');
+        return;
+      }
+
+      const stored = await new Promise((res) => chrome.storage.local.get(['pkce_verifier'], res));
+      const codeVerifierStored = stored.pkce_verifier;
+      if (!codeVerifierStored) {
+        alert('Missing PKCE verifier');
+        return;
+      }
+
+      // Exchange code via local server to obtain refresh_token
+      const serverBase = 'http://localhost:4200';
+      const resp = await fetch(`${serverBase}/auth/exchange`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId, code, redirectUri, codeVerifier: codeVerifierStored })
+      });
+      const j = await resp.json();
+      if (!resp.ok) {
+        alert('Exchange failed: ' + JSON.stringify(j));
+        return;
+      }
+      // Clear verifier
+      await chrome.storage.local.remove(['pkce_verifier']);
       updateAuthStatus();
-      alert('Autenticación OK');
-    } else if (parts.error) {
-      const msg = parts.error_description || parts.error;
-      console.error('OAuth error fragment:', parts);
-      alert('OAuth error: ' + msg);
-      document.getElementById('authStatus').textContent = 'Auth error: ' + msg;
-    } else {
-      alert('No se obtuvo access_token');
+      alert('Autenticado correctamente.');
+    } catch (e) {
+      console.error(e);
+      alert('OAuth exchange error: ' + e.message);
     }
   });
 }
 
 async function googleSignOut() {
-  const s = await new Promise((res) => chrome.storage.local.get(['accessToken'], res));
-  if (s && s.accessToken) {
-    // revoke token
-    try {
-      await fetch(`https://oauth2.googleapis.com/revoke?token=${s.accessToken}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-    } catch (e) { console.warn('Revoke failed', e); }
+  // If we have a custom clientId, ask server to revoke stored refresh token
+  // Prefer server-configured clientId for revoke
+  try {
+    const serverBase = 'http://localhost:4200';
+    const conf = await fetch(`${serverBase}/auth/config`);
+    if (conf.ok) {
+      const cj = await conf.json();
+      if (cj && cj.clientId) {
+        await fetch(`${serverBase}/auth/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: cj.clientId }) });
+      } else {
+        const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
+        const clientId = cfg.clientId || '';
+        if (clientId) {
+          try {
+            await fetch(`${serverBase}/auth/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId }) });
+          } catch (e) { console.warn('Server revoke failed', e); }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Server revoke failed', e);
   }
-  await chrome.storage.local.remove(['accessToken', 'tokenExpiry']);
-  updateAuthStatus();
-  alert('Desconectado');
+
+  chrome.identity.getAuthToken({ interactive: false }, (token) => {
+    (async () => {
+      if (chrome.runtime.lastError || !token) {
+        await chrome.storage.local.remove(['accessToken', 'tokenExpiry']);
+        updateAuthStatus();
+        alert('Desconectado');
+        return;
+      }
+      try {
+        await fetch(`https://oauth2.googleapis.com/revoke?token=${token}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+      } catch (e) { console.warn('Revoke failed', e); }
+      chrome.identity.removeCachedAuthToken({ token }, async () => {
+        await chrome.storage.local.remove(['accessToken', 'tokenExpiry']);
+        updateAuthStatus();
+        alert('Desconectado');
+      });
+    })();
+  });
 }
 
 let eventsVisible = false;
@@ -285,11 +449,15 @@ async function showEvents() {
         out.innerHTML = 'No hay eventos hoy.';
         return;
       }
+      const nowMs = Date.now();
       for (const e of apiEvents) {
         const start = new Date(e.start.dateTime || e.start.date || '');
         const link = e.hangoutLink || e.htmlLink || '';
         const div = document.createElement('div');
         div.className = 'event';
+        if (!isNaN(start) && start.getTime() < nowMs) {
+          div.style.opacity = '0.5';
+        }
         div.innerHTML = `<div><strong>${e.summary || '(No title)'}</strong> — ${isNaN(start) ? 'sin hora' : start.toLocaleString()}</div>${link ? `<div><a href="${link}" target="_blank">${link}</a></div>` : ''}`;
         out.appendChild(div);
       }
@@ -314,10 +482,15 @@ async function showEvents() {
       return;
     }
     out.innerHTML = '';
+    const nowMs = Date.now();
     for (const e of events) {
       const div = document.createElement('div');
+      const start = new Date(e.start);
       div.className = 'event';
-      div.innerHTML = `<div><strong>${e.summary}</strong> — ${new Date(e.start).toLocaleString()}</div>${e.link ? `<div><a href="${e.link}" target="_blank">${e.link}</a></div>` : ''}`;
+      if (!isNaN(start) && start.getTime() < nowMs) {
+        div.style.opacity = '0.5';
+      }
+      div.innerHTML = `<div><strong>${e.summary}</strong> — ${start.toLocaleString()}</div>${e.link ? `<div><a href="${e.link}" target="_blank">${e.link}</a></div>` : ''}`;
       out.appendChild(div);
     }
   } catch (e) {
