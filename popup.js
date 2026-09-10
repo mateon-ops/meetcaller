@@ -46,8 +46,18 @@ function renderEventCard(event, index) {
   actions.className = 'actions';
 
   const stopAudioAndClose = () => {
-    chrome.runtime.sendMessage({ type: 'stop-audio' });
-    window.close();
+    const closePopup = () => window.close();
+    try {
+      const sent = chrome.runtime.sendMessage({ type: 'stop-audio' });
+      if (sent && typeof sent.then === 'function') {
+        sent.finally(closePopup);
+      } else {
+        closePopup();
+      }
+    } catch (e) {
+      closePopup();
+    }
+    setTimeout(closePopup, 400);
   };
 
   const resolveCard = () => {
@@ -73,9 +83,6 @@ function renderEventCard(event, index) {
     resolveCard();
   });
 
-  window.addEventListener('beforeunload', () => {
-    chrome.runtime.sendMessage({ type: 'stop-audio' });
-  });
 
   actions.appendChild(acceptBtn);
   actions.appendChild(rejectBtn);
@@ -85,6 +92,12 @@ function renderEventCard(event, index) {
   card.appendChild(actions);
   return card;
 }
+
+window.addEventListener('beforeunload', () => {
+  try {
+    chrome.runtime.sendMessage({ type: 'stop-audio' });
+  } catch (e) {}
+});
 
 if (!events.length) {
   const fallback = document.createElement('div');

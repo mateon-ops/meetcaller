@@ -1,3 +1,1 @@
-server/node_modules/
-server/.env
-server/data/tokens.json
+# server/ removed; no server-side components included

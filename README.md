@@ -15,19 +15,7 @@ Notas técnicas:
 
 Privacidad: toda la URL y la descarga del .ics quedan en tu navegador local; no se envía nada a servidores externos desde la extensión.
 
-Servidor de configuración local (opcional pero recomendado)
-
-1. En la carpeta `server` instala dependencias e inicia el servidor:
-
-```bash
-cd server
-npm install
-npm start
-```
-
-2. Abre `http://localhost:4200/` para pegar tu URL iCal y ajustar `Minutos antes de avisar`.
-
-3. La extensión abre automáticamente `http://localhost:4200/` al hacer click en el icono.
+Antes este proyecto incluía un servidor de configuración local para facilitar el intercambio de tokens y configurar el iCal. La extensión ahora soporta guardar el `clientId`, `clientSecret` y los tokens directamente en `chrome.storage.local`, por lo que no es necesario ejecutar un servidor local. Si prefieres usar un servidor separado, puedes mantenerlo por tus propios medios.
 
 Uso con Google Calendar API (OAuth)
 

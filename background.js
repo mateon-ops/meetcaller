@@ -1,3 +1,5 @@
+importScripts('google-auth.js');
+
 const DEFAULT_POLL_MINUTES = 1;
 let lastNotified = [];
 
@@ -77,10 +79,36 @@ async function checkCalendar() {
   if (!icalUrl) return;
 
   try {
-    const res = await fetch(icalUrl);
-    if (!res.ok) return;
-    const text = await res.text();
-    const events = parseICSEvents(text);
+    // If the iCal URL points to calendar.google.com, try using the Calendar API
+    let events = [];
+    let usedApi = false;
+    try {
+      const u = new URL(icalUrl);
+      if (u.hostname.includes('calendar.google.com')) {
+        const m = u.pathname.match(/\/calendar\/ical\/([^/]+)\//);
+        if (m && m[1]) {
+          const calendarId = decodeURIComponent(m[1]);
+          try {
+            const items = await fetchGoogleEventsForCalendarId(calendarId);
+            // map API items to the same shape used by parseICSEvents
+            events = (items || []).map(it => ({ uid: it.id, start: new Date(it.start.dateTime || it.start.date), summary: it.summary || '(No title)', desc: it.description || '', location: it.location || '', link: it.hangoutLink || (it.conferenceData && it.conferenceData.entryPoints && it.conferenceData.entryPoints[0] && it.conferenceData.entryPoints[0].uri) || it.htmlLink || '' }));
+            usedApi = true;
+          } catch (e) {
+            console.warn('Calendar API fetch for calendarId failed, falling back to iCal fetch', e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to parse icalUrl, will try raw fetch', e);
+    }
+
+    if (!usedApi) {
+      const res = await fetch(icalUrl);
+      if (!res.ok) return;
+      const text = await res.text();
+      const parsed = parseICSEvents(text);
+      events = parsed;
+    }
     const now = new Date();
     const pending = [];
 
@@ -133,62 +161,14 @@ function handleEventsFromApi(items, pollMinutes, meetOnly) {
 function fetchGoogleCalendarEvents() {
   return new Promise(async (resolve, reject) => {
     try {
-      let clientId = '';
-      try {
-        const serverBase = 'http://localhost:4200';
-        const conf = await fetch(`${serverBase}/auth/config`);
-        if (conf.ok) {
-          const cj = await conf.json();
-          if (cj && cj.clientId) clientId = cj.clientId;
-        }
-      } catch (e) {
-        console.warn('Server config fetch failed', e);
-      }
-
-      if (!clientId) {
-        const s = await getStorage(['clientId']);
-        clientId = s.clientId || '';
-      }
-
-      let token = null;
-      if (clientId) {
-        try {
-          const serverBase = 'http://localhost:4200';
-          const resp = await fetch(`${serverBase}/auth/token?clientId=${encodeURIComponent(clientId)}`);
-          if (resp.ok) {
-            const j = await resp.json();
-            if (j && j.ok && j.token && j.token.access_token) token = j.token.access_token;
-          }
-        } catch (e) {
-          console.warn('Failed to get token from server', e);
-        }
-      }
-
-      if (!token) {
-        // fallback to chrome.identity only if manifest oauth2.client_id is set
-        const manifestClient = (chrome.runtime.getManifest && chrome.runtime.getManifest().oauth2 && chrome.runtime.getManifest().oauth2.client_id) || '';
-        if (!manifestClient || manifestClient.includes('REPLACE_WITH')) {
-          return reject(new Error('No valid oauth2.client_id in manifest and no server token available'));
-        }
-
-        token = await new Promise((res, rej) => {
-          chrome.identity.getAuthToken({ interactive: false }, (t) => {
-            if (chrome.runtime.lastError || !t) {
-              chrome.identity.getAuthToken({ interactive: true }, (freshToken) => {
-                if (chrome.runtime.lastError || !freshToken) return rej(chrome.runtime.lastError || new Error('No token'));
-                res(freshToken);
-              });
-              return;
-            }
-            res(t);
-          });
-        });
-      }
+      // Use the extension's token handling which prefers stored refresh tokens,
+      // then server fallback, then chrome.identity.
+      const token = await getGoogleAccessToken({ interactive: false });
 
       const now = new Date();
-      const timeMin = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-      const timeMax = new Date(now.getFullYear(), now.getMonth(), now.getDate()+1).toISOString();
-      const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime`, { headers: { Authorization: `Bearer ${token}` } });
+      const timeMin = now.toISOString();
+      const timeMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      const res = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=100`, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) return reject(new Error('Google Calendar API error: ' + res.status));
       const j = await res.json();
       resolve(j.items || []);
@@ -320,13 +300,20 @@ function getStorage(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
 }
 
-// message handling: stop audio when popup signals
+// Keep the service worker alive while the offscreen ringtone is playing.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'ringtone-keepalive') return;
+});
+
+// Relay stop-audio so the offscreen document always receives it, even after the
+// service worker was idle (~30s) and the popup is about to close.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'stop-audio') {
-    if (sender && sender.tab) {
-      chrome.runtime.sendMessage({ type: 'stop-audio' });
+    if (!msg.forwarded) {
+      chrome.runtime.sendMessage({ type: 'stop-audio', forwarded: true }).catch(() => {});
     }
-    return true;
+    sendResponse({ ok: true });
+    return false;
   }
   if (msg?.type === 'dismiss-event') {
     const uid = msg.uid;

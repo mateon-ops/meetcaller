@@ -27,7 +27,8 @@ function findMeetingLink(text) {
 
 function isMeetUrl(url) {
   if (!url) return false;
-  return /^https:\/\/meet\.google\.com\//i.test(url);
+  const value = String(url).trim();
+  return /^https:\/\/meet\.google\.com\//i.test(value);
 }
 
 function parseICSTime(s) {
@@ -91,6 +92,8 @@ async function loadConfig() {
   document.getElementById('icalUrl').value = cfg.icalUrl || '';
   document.getElementById('pollMinutes').value = cfg.pollMinutes || 1;
   document.getElementById('meetOnly').checked = !!cfg.meetOnly;
+  document.getElementById('clientId').value = cfg.clientId || '';
+  // Do NOT prefill clientSecret for safety; leave blank
   if (!cfg.ringtoneUrl || !cfg.ringtoneUrl.trim()) {
     try {
       await ensureDefaultRingtone();
@@ -105,6 +108,8 @@ async function saveConfig(silent = false) {
   const icalUrl = document.getElementById('icalUrl').value.trim();
   const pollMinutes = Number(document.getElementById('pollMinutes').value) || 1;
   const meetOnly = document.getElementById('meetOnly').checked;
+  const clientId = (document.getElementById('clientId') && document.getElementById('clientId').value) ? document.getElementById('clientId').value.trim() : '';
+  const clientSecret = (document.getElementById('clientSecret') && document.getElementById('clientSecret').value) ? document.getElementById('clientSecret').value : '';
   const fileInput = document.getElementById('ringtoneFile');
 
   const existing = await new Promise((res) => chrome.storage.local.get(['ringtoneUrl'], res));
@@ -120,6 +125,8 @@ async function saveConfig(silent = false) {
   }
 
   const storeObj = { icalUrl, pollMinutes, ringtoneUrl, meetOnly };
+  if (clientId) storeObj.clientId = clientId;
+  if (clientSecret) storeObj.clientSecret = clientSecret;
   await chrome.storage.local.set(storeObj);
   if (fileInput) fileInput.value = '';
   if (!silent) {
@@ -129,56 +136,14 @@ async function saveConfig(silent = false) {
 
 async function updateAuthStatus() {
   const el = document.getElementById('authStatus');
-  // Prefer server-configured clientId
   try {
-    const serverBase = 'http://localhost:4200';
-    const conf = await fetch(`${serverBase}/auth/config`);
-    if (conf.ok) {
-      const cj = await conf.json();
-      if (cj && cj.clientId) {
-        const st = await fetch(`${serverBase}/auth/status?clientId=${encodeURIComponent(cj.clientId)}`);
-        if (st.ok) {
-          const j = await st.json();
-          if (j && j.ok && j.hasRefresh) {
-            el.textContent = 'Conectado';
-            return;
-          }
-        }
-      }
-    }
+    const connected = await hasGoogleSession();
+    el.textContent = connected ? 'Conectado' : 'No conectado';
+    return;
   } catch (e) {
-    console.warn('Server status check failed', e);
+    console.warn('Error checking session', e);
+    el.textContent = 'No conectado';
   }
-
-  const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
-  const clientId = cfg.clientId || '';
-  if (clientId) {
-    try {
-      const serverBase = 'http://localhost:4200';
-      const st = await fetch(`${serverBase}/auth/status?clientId=${encodeURIComponent(clientId)}`);
-      if (st.ok) {
-        const j = await st.json();
-        if (j && j.ok && j.hasRefresh) {
-          el.textContent = 'Conectado';
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn('Server status check failed', e);
-    }
-  }
-
-  return new Promise((resolve) => {
-    chrome.identity.getAuthToken({ interactive: false }, (token) => {
-      if (chrome.runtime.lastError || !token) {
-        el.textContent = 'No conectado';
-        resolve();
-        return;
-      }
-      el.textContent = 'Conectado';
-      resolve();
-    });
-  });
 }
 
 function parseFragment(url) {
@@ -210,87 +175,66 @@ function randomString(length = 64) {
 }
 
 async function ensureGoogleToken({ interactive = false } = {}) {
-  // Prefer server-configured clientId; fall back to local storage clientId
-  let clientId = '';
-  try {
-    const serverBase = 'http://localhost:4200';
-    const conf = await fetch(`${serverBase}/auth/config`);
-    if (conf.ok) {
-      const cj = await conf.json();
-      if (cj && cj.clientId) clientId = cj.clientId;
+  const cfg = await new Promise((res) => chrome.storage.local.get(['clientId', 'clientSecret', 'accessToken', 'tokenExpiry', 'refreshToken'], res));
+  const clientId = (cfg.clientId || '').trim();
+  const clientSecret = cfg.clientSecret || '';
+  const accessToken = cfg.accessToken || '';
+  const tokenExpiry = Number(cfg.tokenExpiry || 0);
+  const refreshToken = cfg.refreshToken || '';
+
+  if (accessToken && tokenExpiry && Date.now() < tokenExpiry - 15000) {
+    return accessToken;
+  }
+
+  if (clientId && refreshToken) {
+    try {
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: clientId,
+        client_secret: clientSecret || '',
+        refresh_token: refreshToken
+      });
+
+      const res = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString()
+      });
+
+      const tokenJson = await res.json();
+      if (!res.ok) {
+        const detail = tokenJson.error_description || tokenJson.error || 'Refresh token failed';
+        throw new Error(detail);
+      }
+
+      const expiresIn = Math.max(30, Number(tokenJson.expires_in) || 3600);
+      const newAccessToken = tokenJson.access_token;
+      await chrome.storage.local.set({
+        accessToken: newAccessToken,
+        tokenExpiry: Date.now() + expiresIn * 1000,
+        clientId,
+        clientSecret: clientSecret || cfg.clientSecret || ''
+      });
+
+      return newAccessToken;
+    } catch (e) {
+      console.warn('Google refresh token failed in UI flow:', e);
     }
-  } catch (e) {
-    console.warn('Server config fetch failed', e);
   }
 
   if (!clientId) {
-    const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
-    clientId = cfg.clientId || '';
+    throw new Error('No hay Client ID configurado en la UI. Ingresalo en la configuración de MeetCaller.');
   }
 
-  if (clientId) {
-    try {
-      const serverBase = 'http://localhost:4200';
-      const resp = await fetch(`${serverBase}/auth/token?clientId=${encodeURIComponent(clientId)}`);
-      if (resp.ok) {
-        const j = await resp.json();
-        if (j && j.ok && j.token && j.token.access_token) return j.token.access_token;
-      }
-    } catch (e) {
-      console.warn('Server token fetch failed', e);
-    }
-  }
-
-  return new Promise((resolve, reject) => {
-    // Only use chrome.identity.getAuthToken if manifest has a real oauth2.client_id
-    const manifestClient = (chrome.runtime.getManifest && chrome.runtime.getManifest().oauth2 && chrome.runtime.getManifest().oauth2.client_id) || '';
-    if (!manifestClient || manifestClient.includes('REPLACE_WITH')) {
-      reject(new Error('No oauth2 client_id in manifest; use server/clientId flow or set client_id in manifest')); 
-      return;
-    }
-
-    chrome.identity.getAuthToken({ interactive }, (token) => {
-      if (chrome.runtime.lastError || !token) {
-        if (!interactive) {
-          chrome.identity.getAuthToken({ interactive: true }, (freshToken) => {
-            if (chrome.runtime.lastError || !freshToken) {
-              const msg = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'La sesión de Google caducó.';
-              reject(new Error(msg));
-              return;
-            }
-            resolve(freshToken);
-          });
-          return;
-        }
-        const message = chrome.runtime.lastError ? chrome.runtime.lastError.message : 'Token no disponible';
-        reject(new Error(message));
-        return;
-      }
-      resolve(token);
-    });
-  });
+  throw new Error('No hay sesión de Google activa. Iniciá sesión desde la UI de MeetCaller.');
 }
 
 async function googleSignIn() {
-  // Determine effective clientId (server .env or stored)
-  let clientId = '';
-  try {
-    const serverBase = 'http://localhost:4200';
-    const conf = await fetch(`${serverBase}/auth/config`);
-    if (conf.ok) {
-      const cj = await conf.json();
-      if (cj && cj.clientId) clientId = cj.clientId;
-    }
-  } catch (e) {
-    console.warn('Failed to fetch server config', e);
-  }
-
-  if (!clientId) {
-    const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
-    clientId = cfg.clientId || '';
-  }
-
-  if (!clientId) { alert('No hay Client ID configurado en el servidor ni localmente'); return; }
+  // Determine effective clientId (stored or manifest)
+  const storedCfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
+  let clientId = storedCfg.clientId || '';
+  if (!clientId) clientId = (chrome.runtime.getManifest && chrome.runtime.getManifest().oauth2 && chrome.runtime.getManifest().oauth2.client_id) || '';
+  if (!clientId) { alert('No hay Client ID configurado localmente ni en el manifest'); return; }
   const redirectUri = chrome.identity.getRedirectURL('oauth2');
   const scope = encodeURIComponent('https://www.googleapis.com/auth/calendar.readonly');
 
@@ -332,19 +276,23 @@ async function googleSignIn() {
         return;
       }
 
-      // Exchange code via local server to obtain refresh_token
-      const serverBase = 'http://localhost:4200';
-      const resp = await fetch(`${serverBase}/auth/exchange`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, code, redirectUri, codeVerifier: codeVerifierStored })
-      });
-      const j = await resp.json();
-      if (!resp.ok) {
-        alert('Exchange failed: ' + JSON.stringify(j));
+      // Exchange code locally (extension) to obtain refresh_token
+      try {
+        await exchangeGoogleAuthCode({ clientId, code, redirectUri, codeVerifier: codeVerifierStored, clientSecret: (document.getElementById('clientSecret') && document.getElementById('clientSecret').value) || undefined });
+      } catch (ex) {
+        alert('Exchange failed: ' + (ex && ex.message ? ex.message : JSON.stringify(ex)));
         return;
       }
+
       // Clear verifier
       await chrome.storage.local.remove(['pkce_verifier']);
+      // Persist clientId and clientSecret values set in the form
+      const toSave = {};
+      if (clientId) toSave.clientId = clientId;
+      const cs = (document.getElementById('clientSecret') && document.getElementById('clientSecret').value) || '';
+      if (cs) toSave.clientSecret = cs;
+      if (Object.keys(toSave).length) await chrome.storage.local.set(toSave);
+
       updateAuthStatus();
       alert('Autenticado correctamente.');
     } catch (e) {
@@ -355,47 +303,15 @@ async function googleSignIn() {
 }
 
 async function googleSignOut() {
-  // If we have a custom clientId, ask server to revoke stored refresh token
-  // Prefer server-configured clientId for revoke
   try {
-    const serverBase = 'http://localhost:4200';
-    const conf = await fetch(`${serverBase}/auth/config`);
-    if (conf.ok) {
-      const cj = await conf.json();
-      if (cj && cj.clientId) {
-        await fetch(`${serverBase}/auth/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: cj.clientId }) });
-      } else {
-        const cfg = await new Promise((res) => chrome.storage.local.get(['clientId'], res));
-        const clientId = cfg.clientId || '';
-        if (clientId) {
-          try {
-            await fetch(`${serverBase}/auth/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId }) });
-          } catch (e) { console.warn('Server revoke failed', e); }
-        }
-      }
-    }
+    await revokeGoogleSession();
   } catch (e) {
-    console.warn('Server revoke failed', e);
+    console.warn('Revoke local session failed', e);
   }
-
-  chrome.identity.getAuthToken({ interactive: false }, (token) => {
-    (async () => {
-      if (chrome.runtime.lastError || !token) {
-        await chrome.storage.local.remove(['accessToken', 'tokenExpiry']);
-        updateAuthStatus();
-        alert('Desconectado');
-        return;
-      }
-      try {
-        await fetch(`https://oauth2.googleapis.com/revoke?token=${token}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-      } catch (e) { console.warn('Revoke failed', e); }
-      chrome.identity.removeCachedAuthToken({ token }, async () => {
-        await chrome.storage.local.remove(['accessToken', 'tokenExpiry']);
-        updateAuthStatus();
-        alert('Desconectado');
-      });
-    })();
-  });
+  // Also clear clientSecret locally for safety
+  await chrome.storage.local.remove(['clientSecret', 'accessToken', 'tokenExpiry', 'refreshToken']);
+  updateAuthStatus();
+  alert('Desconectado');
 }
 
 let eventsVisible = false;
@@ -470,13 +386,38 @@ async function showEvents() {
       out.innerHTML = 'Ingresá una iCal URL válida o inicia sesión con Google.';
       return;
     }
-    const r = await fetch(icalUrl);
-    if (!r.ok) {
-      out.innerHTML = 'No se pudo descargar el archivo .ics';
-      return;
+    // If the URL is a Google calendar iCal, try the Calendar API for that calendar id
+    let events = [];
+    let usedApi = false;
+    try {
+      const u = new URL(icalUrl);
+      if (u.hostname.includes('calendar.google.com')) {
+        const m = u.pathname.match(/\/calendar\/ical\/([^/]+)\//);
+        if (m && m[1]) {
+          const calendarId = decodeURIComponent(m[1]);
+          try {
+            const items = await fetchGoogleEventsForCalendarId(calendarId);
+            events = (items || []).map(it => ({ uid: it.id, start: new Date(it.start.dateTime || it.start.date), summary: it.summary || '(No title)', desc: it.description || '', location: it.location || '', link: it.hangoutLink || (it.conferenceData && it.conferenceData.entryPoints && it.conferenceData.entryPoints[0] && it.conferenceData.entryPoints[0].uri) || it.htmlLink || '' }));
+            usedApi = true;
+          } catch (e) {
+            console.warn('Calendar API fetch for calendarId failed, falling back to iCal fetch', e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to parse icalUrl, will try raw fetch', e);
     }
-    const txt = await r.text();
-    const events = parseICSEvents(txt);
+
+    if (!usedApi) {
+      const r = await fetch(icalUrl);
+      if (!r.ok) {
+        out.innerHTML = 'No se pudo descargar el archivo .ics';
+        return;
+      }
+      const txt = await r.text();
+      const parsed = parseICSEvents(txt);
+      events = parsed.map(e => ({ uid: e.uid, start: new Date(e.start), summary: e.summary, desc: e.desc, location: e.location, link: e.link }));
+    }
     if (!events.length) {
       out.innerHTML = 'No hay eventos.';
       return;
@@ -548,6 +489,7 @@ async function refreshNextMeeting() {
   try {
     const { meetOnly, icalUrl } = await new Promise((res) => chrome.storage.local.get(['meetOnly', 'icalUrl'], res));
     const now = new Date();
+    const futureLimit = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
     let items = [];
     let apiSuccess = false;
 
@@ -555,9 +497,9 @@ async function refreshNextMeeting() {
     try {
       let token = await ensureGoogleToken({ interactive: false });
       const timeMin = now.toISOString();
-      const timeMax = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+      const timeMax = futureLimit.toISOString();
       const res = await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=20`,
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=50`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (res.ok) {
@@ -568,7 +510,7 @@ async function refreshNextMeeting() {
           .map(e => ({
             time: new Date(e.start.dateTime || e.start.date),
             name: e.summary || '(Sin título)',
-            meetUrl: e.hangoutLink || ''
+            meetUrl: resolveGoogleEventLink(e)
           }));
         apiSuccess = true;
       }
@@ -594,12 +536,13 @@ async function refreshNextMeeting() {
       }
     }
 
-    // pick the soonest future event, filtering by Meet URL if meetOnly is set
+    // pick the soonest future event, but when meetOnly is enabled only consider Meet events
     const upcoming = items
       .filter(e => {
+        if (!(e && e.time instanceof Date) || isNaN(e.time)) return false;
         if (e.time <= now) return false;
-        if (meetOnly && !isMeetUrl(e.meetUrl)) return false;
-        return true;
+        const meetUrl = typeof e.meetUrl === 'string' ? e.meetUrl : (e.meetUrl && e.meetUrl.then ? '' : '');
+        return !meetOnly || isMeetUrl(meetUrl);
       })
       .sort((a, b) => a.time - b.time);
 
@@ -624,7 +567,15 @@ function startCountdown() {
   tickCountdown();
 }
 
-function init() {
+function resolveGoogleEventLink(event) {
+  if (!event) return '';
+  return event.hangoutLink ||
+    (event.conferenceData && event.conferenceData.entryPoints && event.conferenceData.entryPoints[0] && event.conferenceData.entryPoints[0].uri) ||
+    event.htmlLink ||
+    '';
+}
+
+async function init() {
   document.getElementById('googleSignIn').addEventListener('click', googleSignIn);
   document.getElementById('googleSignOut').addEventListener('click', googleSignOut);
   document.getElementById('save').addEventListener('click', () => saveConfig(false));
@@ -648,7 +599,7 @@ function init() {
   document.getElementById('pollMinutes').addEventListener('input', () => saveConfig(true));
   document.getElementById('icalUrl').addEventListener('input', () => saveConfig(true));
 
-  loadConfig();
+  await loadConfig();
   startCountdown();
 }
 

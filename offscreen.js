@@ -5,11 +5,30 @@ let isLooping = false;
 let ringPatternTimer = null;
 let oscillator = null;
 let oscillatorGain = null;
+let keepalivePort = null;
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'play-audio') playTone(msg.ringtoneUrl || '', { loop: msg.loop !== false });
   if (msg.type === 'stop-audio') stopTone();
 });
+
+function keepServiceWorkerAlive(active) {
+  if (active) {
+    if (keepalivePort) return;
+    try {
+      keepalivePort = chrome.runtime.connect({ name: 'ringtone-keepalive' });
+      keepalivePort.onDisconnect.addListener(() => {
+        keepalivePort = null;
+      });
+    } catch (e) {}
+    return;
+  }
+  if (!keepalivePort) return;
+  try {
+    keepalivePort.disconnect();
+  } catch (e) {}
+  keepalivePort = null;
+}
 
 function ensureAudioContext() {
   if (!audioCtx) {
@@ -25,25 +44,27 @@ function ensureAudioContext() {
 
 function playTone(ringtoneUrl = '', { loop = true } = {}) {
   stopTone();
+  keepServiceWorkerAlive(true);
 
   if (ringtoneUrl) {
-    remoteAudio = new Audio(ringtoneUrl);
-    remoteAudio.preload = 'auto';
-    remoteAudio.volume = 1;
-    remoteAudio.loop = !!loop;
-    remoteAudio.muted = false;
-    remoteAudio.addEventListener('ended', () => {
-      if (!isLooping || !remoteAudio) return;
-      remoteAudio.currentTime = 0;
-      remoteAudio.play().catch(() => {});
+    const audio = new Audio(ringtoneUrl);
+    remoteAudio = audio;
+    audio.preload = 'auto';
+    audio.volume = 1;
+    audio.loop = !!loop;
+    audio.muted = false;
+    audio.addEventListener('ended', () => {
+      if (!isLooping || remoteAudio !== audio) return;
+      audio.currentTime = 0;
+      audio.play().catch(() => {});
     });
     isLooping = true;
-    remoteAudio.play().catch((err) => {
+    audio.play().catch((err) => {
       console.warn('Audio play() rejected for ringtone', err);
       setTimeout(() => {
-        if (!remoteAudio) return;
-        remoteAudio.currentTime = 0;
-        remoteAudio.play().catch(() => {});
+        if (!isLooping || remoteAudio !== audio) return;
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
       }, 500);
     });
     return;
@@ -82,6 +103,7 @@ function playTone(ringtoneUrl = '', { loop = true } = {}) {
 
 function stopTone() {
   isLooping = false;
+  keepServiceWorkerAlive(false);
 
   if (ringPatternTimer) {
     clearTimeout(ringPatternTimer);
@@ -89,9 +111,17 @@ function stopTone() {
   }
 
   if (remoteAudio) {
-    remoteAudio.pause();
-    remoteAudio.currentTime = 0;
+    const audio = remoteAudio;
     remoteAudio = null;
+    audio.loop = false;
+    audio.onended = null;
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.removeAttribute('src');
+      audio.src = '';
+      audio.load();
+    } catch (e) {}
   }
 
   if (oscillator) {
