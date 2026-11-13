@@ -1,44 +1,7 @@
-function parseICSEvents(icsText) {
-  const events = [];
-  const vevents = icsText.split(/BEGIN:VEVENT/).slice(1);
-  for (const v of vevents) {
-    const uidMatch = v.match(/UID:(.+)/);
-    const uid = uidMatch ? uidMatch[1].trim() : Math.random().toString(36).slice(2);
-    const dtMatch = v.match(/DTSTART(?:;TZID=[^:]+)?:([^\r\n]+)/);
-    if (!dtMatch) continue;
-    const dt = parseICSTime(dtMatch[1].trim());
-    const summaryMatch = v.match(/SUMMARY:(.+)/);
-    const summary = summaryMatch ? summaryMatch[1].trim() : '(No title)';
-    const descMatch = v.match(/DESCRIPTION:(.+)/s);
-    const desc = descMatch ? descMatch[1].trim() : '';
-    const locMatch = v.match(/LOCATION:(.+)/);
-    const location = locMatch ? locMatch[1].trim() : '';
-    const link = findMeetingLink(v) || findMeetingLink(desc) || findMeetingLink(location) || null;
-    events.push({ uid, start: dt.toISOString(), summary, desc, location, link });
-  }
-  return events;
-}
-
-function findMeetingLink(text) {
-  if (!text) return null;
-  const m = text.match(/https?:\/\/[^\s)]+/i);
-  return m ? m[0] : null;
-}
-
 function isMeetUrl(url) {
   if (!url) return false;
   const value = String(url).trim();
   return /^https:\/\/meet\.google\.com\//i.test(value);
-}
-
-function parseICSTime(s) {
-  const z = s.endsWith('Z');
-  const clean = s.replace(/\s+/g, '');
-  const parts = clean.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/);
-  if (!parts) return new Date(clean);
-  const [_, Y, M, D, h, m, sec] = parts;
-  const iso = `${Y}-${M}-${D}T${h}:${m}:${sec}${z ? 'Z' : ''}`;
-  return new Date(iso);
 }
 
 function normalizeDriveAudioUrl(rawUrl) {
@@ -88,8 +51,7 @@ async function ensureDefaultRingtone() {
 }
 
 async function loadConfig() {
-  const cfg = await new Promise((res) => chrome.storage.local.get(['icalUrl', 'pollMinutes', 'clientId', 'ringtoneUrl', 'meetOnly'], res));
-  document.getElementById('icalUrl').value = cfg.icalUrl || '';
+  const cfg = await new Promise((res) => chrome.storage.local.get(['pollMinutes', 'clientId', 'ringtoneUrl', 'meetOnly'], res));
   document.getElementById('pollMinutes').value = cfg.pollMinutes || 1;
   document.getElementById('meetOnly').checked = !!cfg.meetOnly;
   document.getElementById('clientId').value = cfg.clientId || '';
@@ -105,7 +67,6 @@ async function loadConfig() {
 }
 
 async function saveConfig(silent = false) {
-  const icalUrl = document.getElementById('icalUrl').value.trim();
   const pollMinutes = Number(document.getElementById('pollMinutes').value) || 1;
   const meetOnly = document.getElementById('meetOnly').checked;
   const clientId = (document.getElementById('clientId') && document.getElementById('clientId').value) ? document.getElementById('clientId').value.trim() : '';
@@ -124,7 +85,7 @@ async function saveConfig(silent = false) {
     }
   }
 
-  const storeObj = { icalUrl, pollMinutes, ringtoneUrl, meetOnly };
+  const storeObj = { pollMinutes, ringtoneUrl, meetOnly };
   if (clientId) storeObj.clientId = clientId;
   if (clientSecret) storeObj.clientSecret = clientSecret;
   await chrome.storage.local.set(storeObj);
@@ -340,7 +301,7 @@ async function showEvents() {
 
   try {
     // Always try Google API first
-    let token = await ensureGoogleToken({ interactive: false });
+    const token = await ensureGoogleToken({ interactive: false });
     const now = new Date();
     const timeMin = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
     const timeMax = new Date(now.getFullYear(), now.getMonth(), now.getDate()+1).toISOString();
@@ -353,90 +314,32 @@ async function showEvents() {
       console.warn('Google API returned error status:', apiRes.status);
     }
   } catch (e) {
-    console.warn('Google API failed or no token, falling back to iCal:', e);
+    console.warn('Google Calendar API request failed:', e);
     // Update auth status to be clean/clear
     updateAuthStatus();
   }
 
-  try {
-    if (apiSuccess) {
-      out.innerHTML = '';
-      if (!apiEvents.length) {
-        out.innerHTML = 'No hay eventos hoy.';
-        return;
-      }
-      const nowMs = Date.now();
-      for (const e of apiEvents) {
-        const start = new Date(e.start.dateTime || e.start.date || '');
-        const link = e.hangoutLink || e.htmlLink || '';
-        const div = document.createElement('div');
-        div.className = 'event';
-        if (!isNaN(start) && start.getTime() < nowMs) {
-          div.style.opacity = '0.5';
-        }
-        div.innerHTML = `<div><strong>${e.summary || '(No title)'}</strong> — ${isNaN(start) ? 'sin hora' : start.toLocaleString()}</div>${link ? `<div><a href="${link}" target="_blank">${link}</a></div>` : ''}`;
-        out.appendChild(div);
-      }
-      return;
-    }
+  if (!apiSuccess) {
+    out.innerHTML = 'No se pudieron cargar los eventos de Google Calendar. Iniciá sesión y revisá la configuración OAuth.';
+    return;
+  }
 
-    // fallback to iCal (Google API did not succeed)
-    const icalUrl = document.getElementById('icalUrl').value.trim();
-    if (!icalUrl) {
-      out.innerHTML = 'Ingresá una iCal URL válida o inicia sesión con Google.';
-      return;
+  if (!apiEvents.length) {
+    out.innerHTML = 'No hay eventos hoy.';
+    return;
+  }
+  out.innerHTML = '';
+  const nowMs = Date.now();
+  for (const e of apiEvents) {
+    const start = new Date(e.start.dateTime || e.start.date || '');
+    const link = e.hangoutLink || e.htmlLink || '';
+    const div = document.createElement('div');
+    div.className = 'event';
+    if (!isNaN(start) && start.getTime() < nowMs) {
+      div.style.opacity = '0.5';
     }
-    // If the URL is a Google calendar iCal, try the Calendar API for that calendar id
-    let events = [];
-    let usedApi = false;
-    try {
-      const u = new URL(icalUrl);
-      if (u.hostname.includes('calendar.google.com')) {
-        const m = u.pathname.match(/\/calendar\/ical\/([^/]+)\//);
-        if (m && m[1]) {
-          const calendarId = decodeURIComponent(m[1]);
-          try {
-            const items = await fetchGoogleEventsForCalendarId(calendarId);
-            events = (items || []).map(it => ({ uid: it.id, start: new Date(it.start.dateTime || it.start.date), summary: it.summary || '(No title)', desc: it.description || '', location: it.location || '', link: it.hangoutLink || (it.conferenceData && it.conferenceData.entryPoints && it.conferenceData.entryPoints[0] && it.conferenceData.entryPoints[0].uri) || it.htmlLink || '' }));
-            usedApi = true;
-          } catch (e) {
-            console.warn('Calendar API fetch for calendarId failed, falling back to iCal fetch', e);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to parse icalUrl, will try raw fetch', e);
-    }
-
-    if (!usedApi) {
-      const r = await fetch(icalUrl);
-      if (!r.ok) {
-        out.innerHTML = 'No se pudo descargar el archivo .ics';
-        return;
-      }
-      const txt = await r.text();
-      const parsed = parseICSEvents(txt);
-      events = parsed.map(e => ({ uid: e.uid, start: new Date(e.start), summary: e.summary, desc: e.desc, location: e.location, link: e.link }));
-    }
-    if (!events.length) {
-      out.innerHTML = 'No hay eventos.';
-      return;
-    }
-    out.innerHTML = '';
-    const nowMs = Date.now();
-    for (const e of events) {
-      const div = document.createElement('div');
-      const start = new Date(e.start);
-      div.className = 'event';
-      if (!isNaN(start) && start.getTime() < nowMs) {
-        div.style.opacity = '0.5';
-      }
-      div.innerHTML = `<div><strong>${e.summary}</strong> — ${start.toLocaleString()}</div>${e.link ? `<div><a href="${e.link}" target="_blank">${e.link}</a></div>` : ''}`;
-      out.appendChild(div);
-    }
-  } catch (e) {
-    out.innerHTML = 'Error: ' + e.message;
-    console.error(e);
+    div.innerHTML = `<div><strong>${e.summary || '(No title)'}</strong> — ${isNaN(start) ? 'sin hora' : start.toLocaleString()}</div>${link ? `<div><a href="${link}" target="_blank">${link}</a></div>` : ''}`;
+    out.appendChild(div);
   }
 }
 
@@ -487,15 +390,14 @@ function tickCountdown() {
 
 async function refreshNextMeeting() {
   try {
-    const { meetOnly, icalUrl } = await new Promise((res) => chrome.storage.local.get(['meetOnly', 'icalUrl'], res));
+    const { meetOnly } = await new Promise((res) => chrome.storage.local.get(['meetOnly'], res));
     const now = new Date();
     const futureLimit = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
     let items = [];
-    let apiSuccess = false;
 
     // 1. Try Google Calendar API
     try {
-      let token = await ensureGoogleToken({ interactive: false });
+      const token = await ensureGoogleToken({ interactive: false });
       const timeMin = now.toISOString();
       const timeMax = futureLimit.toISOString();
       const res = await fetch(
@@ -512,28 +414,9 @@ async function refreshNextMeeting() {
             name: e.summary || '(Sin título)',
             meetUrl: resolveGoogleEventLink(e)
           }));
-        apiSuccess = true;
       }
     } catch (e) {
-      console.debug('Google API token/request failed, falling back to iCal for countdown:', e);
-    }
-
-    // 2. Try iCal fallback if Google API failed
-    if (!apiSuccess && icalUrl) {
-      try {
-        const r = await fetch(icalUrl);
-        if (r.ok) {
-          const txt = await r.text();
-          const parsed = parseICSEvents(txt);
-          items = parsed.map(e => ({
-            time: new Date(e.start),
-            name: e.summary || '(Sin título)',
-            meetUrl: e.link || ''
-          }));
-        }
-      } catch (e) {
-        console.warn('Failed to fetch iCal for countdown:', e);
-      }
+      console.warn('Google Calendar API request failed while refreshing countdown:', e);
     }
 
     // pick the soonest future event, but when meetOnly is enabled only consider Meet events
@@ -597,8 +480,6 @@ async function init() {
   // Auto-save changes immediately to update the countdown in real-time
   document.getElementById('meetOnly').addEventListener('change', () => saveConfig(true));
   document.getElementById('pollMinutes').addEventListener('input', () => saveConfig(true));
-  document.getElementById('icalUrl').addEventListener('input', () => saveConfig(true));
-
   await loadConfig();
   startCountdown();
 }
@@ -608,7 +489,6 @@ document.addEventListener('DOMContentLoaded', init);
 // Sync UI in real-time when storage changes elsewhere
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
-  if (changes.icalUrl) document.getElementById('icalUrl').value = changes.icalUrl.newValue || '';
   if (changes.pollMinutes) document.getElementById('pollMinutes').value = changes.pollMinutes.newValue || 1;
   if (changes.meetOnly) document.getElementById('meetOnly').checked = !!changes.meetOnly.newValue;
 

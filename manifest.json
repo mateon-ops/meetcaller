@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MeetCaller",
   "version": "0.1",
-  "description": "Detecta eventos del calendario iCal privado y muestra llamada entrante.",
+  "description": "Detecta eventos de Google Calendar y muestra llamada entrante.",
   "permissions": [
     "alarms",
     "storage",

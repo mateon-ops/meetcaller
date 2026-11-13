@@ -37,9 +37,8 @@ chrome.runtime.onInstalled.addListener((details) => {
     clearNotificationCache();
   }
 
-  chrome.storage.local.get(["icalUrl", "pollMinutes"], (res) => {
+  chrome.storage.local.get(["pollMinutes"], (res) => {
     if (!res.pollMinutes) chrome.storage.local.set({ pollMinutes: DEFAULT_POLL_MINUTES });
-    if (!res.icalUrl) chrome.storage.local.set({ icalUrl: "" });
     // Always poll every 1 minute so events are never missed due to alarm timing.
     // pollMinutes only controls the notification window, not the check frequency.
     chrome.alarms.create("poll", { periodInMinutes: 1 });
@@ -66,72 +65,16 @@ function isMeetUrl(url) {
 }
 
 async function checkCalendar() {
-  const { icalUrl, pollMinutes, meetOnly } = await getStorage(["icalUrl", "pollMinutes", "meetOnly"]);
-  console.debug('checkCalendar running', { icalUrl, pollMinutes, meetOnly, now: new Date().toString() });
-  // Always try Google Calendar API first (token must be available via dynamic OAuth)
+  const { pollMinutes, meetOnly } = await getStorage(["pollMinutes", "meetOnly"]);
+  console.debug('checkCalendar running', { pollMinutes, meetOnly, now: new Date().toString() });
   try {
     const events = await fetchGoogleCalendarEvents();
     handleEventsFromApi(events, pollMinutes || DEFAULT_POLL_MINUTES, meetOnly);
     return;
   } catch (e) {
-    console.warn('Google API failed or no token, falling back to iCal:', e);
+    console.warn('Google Calendar API request failed:', e);
   }
-  if (!icalUrl) return;
 
-  try {
-    // If the iCal URL points to calendar.google.com, try using the Calendar API
-    let events = [];
-    let usedApi = false;
-    try {
-      const u = new URL(icalUrl);
-      if (u.hostname.includes('calendar.google.com')) {
-        const m = u.pathname.match(/\/calendar\/ical\/([^/]+)\//);
-        if (m && m[1]) {
-          const calendarId = decodeURIComponent(m[1]);
-          try {
-            const items = await fetchGoogleEventsForCalendarId(calendarId);
-            // map API items to the same shape used by parseICSEvents
-            events = (items || []).map(it => ({ uid: it.id, start: new Date(it.start.dateTime || it.start.date), summary: it.summary || '(No title)', desc: it.description || '', location: it.location || '', link: it.hangoutLink || (it.conferenceData && it.conferenceData.entryPoints && it.conferenceData.entryPoints[0] && it.conferenceData.entryPoints[0].uri) || it.htmlLink || '' }));
-            usedApi = true;
-          } catch (e) {
-            console.warn('Calendar API fetch for calendarId failed, falling back to iCal fetch', e);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to parse icalUrl, will try raw fetch', e);
-    }
-
-    if (!usedApi) {
-      const res = await fetch(icalUrl);
-      if (!res.ok) return;
-      const text = await res.text();
-      const parsed = parseICSEvents(text);
-      events = parsed;
-    }
-    const now = new Date();
-    const pending = [];
-
-    for (const ev of events) {
-      const start = ev.start;
-      const msUntil = start - now;
-      console.debug('ICS event', { uid: ev.uid, summary: ev.summary, start: start.toString(), msUntil });
-      if (msUntil <= (pollMinutes || DEFAULT_POLL_MINUTES) * 60 * 1000 && msUntil >= -60 * 1000) {
-        if (meetOnly && !isMeetUrl(ev.link)) {
-          continue;
-        }
-        if (!isAlreadyNotified(ev.uid)) {
-          pending.push({ uid: ev.uid, start, summary: ev.summary, link: ev.link });
-        }
-      }
-    }
-    if (pending.length) {
-      for (const item of pending) markNotified(item.uid);
-      triggerIncoming(pending);
-    }
-  } catch (e) {
-    console.error("Failed to fetch/parse ical", e);
-  }
 }
 
 function handleEventsFromApi(items, pollMinutes, meetOnly) {
@@ -228,55 +171,6 @@ function triggerIncoming(eventOrList) {
   chrome.windows.create({ url: `popup.html?events=${payload}` , width: features.width, height: features.height, focused: true, type: features.type }, () => {});
 }
 
-function parseICSEvents(icsText) {
-  const events = [];
-  const vevents = icsText.split(/BEGIN:VEVENT/).slice(1);
-  for (const v of vevents) {
-    const uidMatch = v.match(/UID:(.+)/);
-    const uid = uidMatch ? uidMatch[1].trim() : Math.random().toString(36).slice(2);
-
-    const dtMatch = v.match(/DTSTART(?:;TZID=[^:]+)?:([^\r\n]+)/);
-    if (!dtMatch) continue;
-    const dt = parseICSTime(dtMatch[1].trim());
-
-    const summaryMatch = v.match(/SUMMARY:(.+)/);
-    const summary = summaryMatch ? decodeICSEscapes(summaryMatch[1].trim()) : "(No title)";
-
-    const descMatch = v.match(/DESCRIPTION:(.+)/s);
-    const desc = descMatch ? decodeICSEscapes(descMatch[1].trim()) : "";
-
-    // try location too
-    const locMatch = v.match(/LOCATION:(.+)/);
-    const location = locMatch ? decodeICSEscapes(locMatch[1].trim()) : "";
-
-    const link = findMeetingLink(v) || findMeetingLink(desc) || findMeetingLink(location) || null;
-
-    events.push({ uid, start: dt, summary, desc, location, link });
-  }
-  return events;
-}
-
-function decodeICSEscapes(s) {
-  return s.replace(/\\n/g, "\n").replace(/\,/, ",");
-}
-
-function findMeetingLink(text) {
-  if (!text) return null;
-  const m = text.match(/https?:\/\/[^\s)]+/i);
-  return m ? m[0] : null;
-}
-
-function parseICSTime(s) {
-  // Examples: 20260826T153000Z or 20260826T153000
-  const z = s.endsWith("Z");
-  const clean = s.replace(/\s+/g, "");
-  const parts = clean.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/);
-  if (!parts) return new Date(clean);
-  const [_, Y, M, D, h, m, sec] = parts;
-  const iso = `${Y}-${M}-${D}T${h}:${m}:${sec}${z ? 'Z' : ''}`;
-  return new Date(iso);
-}
-
 function ensureOffscreen() {
   // chrome.offscreen.hasDocument() returns a Promise<boolean> so await it.
   return (async () => {
@@ -347,7 +241,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     clearNotificationCache();  // ← events may now be within the new window; allow re-notification
     checkCalendar();
   }
-  if (!changes.icalUrl && !changes.pollMinutes) return;
+  if (!changes.pollMinutes) return;
   const title = 'MeetCaller';
   const message = 'Configuración guardada';
   const opt = {
@@ -368,4 +262,3 @@ chrome.runtime.onStartup.addListener(async () => {
 
 // Run an initial calendar check when the service worker starts (helpful during development/reload)
 checkCalendar();
-
